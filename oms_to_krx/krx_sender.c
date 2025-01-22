@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <mqueue.h>
 #include <oms_fep_krx_struct.h>
+#include <envs.h>
 
 // shared memory
 #include <sys/mman.h>
@@ -30,23 +31,6 @@ int main() {
 
     mqd_t mq;
     struct mq_attr attr;
-
-    void remove_spaces(char *str) {
-        int i = 0, j = 0;
-
-        // Loop through the string
-        while (str[i] != '\0') {
-            // Copy only non-space characters
-            if (str[i] != ' ') {
-                str[j] = str[i];
-                j++;
-            }
-            i++;
-        }
-
-        // Null-terminate the modified string
-        str[j] = '\0';
-    }
 
     // TCP 송신 함수
     void send_order_to_krx(fkq_order *order) {
@@ -76,7 +60,7 @@ int main() {
         }
 
         // 구조체 데이터 전송
-        ssize_t sent_byte = send(sock, order, sizeof(order), 0);
+        ssize_t sent_byte = send(sock, order, sizeof(fkq_order), 0);
         if (sent_byte < 0) {
             perror("Failed to send data");
             close(sock);
@@ -89,14 +73,8 @@ int main() {
         // close(sock);
     }
 
-    void file_int_assign(int *address, FILE *file){
-        char buffer[12];
-        fread(buffer, sizeof(char), 11, file);
-        buffer[11] = '\0';
-        *address = atoi(buffer);
-    }
+    void read_order_from_bin_file(const char *filepath, int start, int end, R_count *r_count) {
 
-    void read_order_from_file_by_fixed_len(const char *filepath, int start, int end, R_count *r_count) {
         fkq_order order;
         memset(&order, 0, sizeof(order)); // Initialize the struct
 
@@ -105,42 +83,13 @@ int main() {
             perror("Error opening file");
             return;
         }
-
-        // Calculate the position of the line
-        size_t struct_size = sizeof(order);
-
         while(end > r_count->rc){
-            // int를 11byte로 대응시켜서 하드코딩.. refactor 필요
-            if (fseek(file, 153 * r_count->rc, SEEK_SET) != 0) {
+            if (fseek(file, sizeof(fkq_order) * r_count->rc, SEEK_SET) != 0) {
             perror("Failed to seek to line");
             fclose(file);
             exit(EXIT_FAILURE);
             }
-            // Read the struct from the file
-            file_int_assign(&order.hdr.tr_id, file);
-            file_int_assign(&order.hdr.length, file);
-            fread(order.stock_code, sizeof(order.stock_code), 1, file);
-            remove_spaces(order.stock_code);
-            fread(order.stock_name, sizeof(order.stock_name), 1, file);
-            remove_spaces(order.stock_name);
-            fread(order.transaction_code, sizeof(order.transaction_code), 1, file);
-            remove_spaces(order.transaction_code);
-            fread(order.user_id, sizeof(order.user_id), 1, file);
-            remove_spaces(order.user_id);
-
-            fread(&order.order_type, sizeof(order.order_type), 1, file);
-            file_int_assign(&order.quantity, file);
-            fread(order.order_time, sizeof(order.order_time), 1, file);
-            file_int_assign(&order.price, file);
-            fread(order.original_order, sizeof(order.original_order), 1, file);
-            remove_spaces(order.original_order);
-
-            // add null
-            order.stock_name[sizeof(order.stock_name) - 1] = '\0'; // Null-terminate
-            order.transaction_code[sizeof(order.transaction_code) - 1] = '\0'; // Null-terminate
-            order.user_id[sizeof(order.user_id) - 1] = '\0'; // Null-terminate
-            order.order_time[sizeof(order.order_time) - 1] = '\0'; // Null-terminate
-            order.original_order[sizeof(order.original_order) - 1] = '\0'; // Null-terminate
+            fread(&order, sizeof(fkq_order), 1, file);
 
             send_order_to_krx(&order);
             r_count->rc++;
@@ -159,9 +108,7 @@ int main() {
                             order.price,
                             order.original_order);
 
-        }
-
-        fclose(file);
+        }   
     }
 
     // mmap memory code
@@ -260,8 +207,7 @@ int main() {
         // Convert the byte array back to a long
         printf("Received: %d\n", received_wc);
         if(received_wc > r_count->rc){
-            // read_lines_from_file(filepath, r_count->rc, received_wc, r_count);
-            read_order_from_file_by_fixed_len(filepath, r_count->rc, received_wc, r_count);
+            read_order_from_bin_file(filepath, r_count->rc, received_wc, r_count);
         }
 
     }
