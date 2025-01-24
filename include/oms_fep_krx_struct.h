@@ -51,14 +51,5 @@ typedef struct{
     char original_order[7];   // 원주문번호 (문자열)
 } ofq_order;
 
-typedef struct {
-    hdr hdr;
-    char transaction_code[7]; // 거래코드 
-    char user_id[21];         // 유저 ID 
-    char time[15];            // 응답시간 (YYYYMMDDHHMMSS)
-    char reject_code[7];      // 거부사유코드 (문자열)
-} fot_order_is_submitted;
-
-
 
 #endif //OMSFEPKRX_STRUCT_H

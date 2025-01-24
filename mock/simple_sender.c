@@ -24,12 +24,6 @@ typedef struct {
     char original_order[7];   // 원주문번호 (문자열)
 } fkq_order;
 
-typedef struct {
-    int id;
-    char type;
-    char message[50];
-} MyStruct;
-
 int main() {
     int sock;
     struct sockaddr_in server_addr;
@@ -102,6 +96,8 @@ int main() {
     }
 
     // printf("Data sent: id=%d, type=%c, message=%s\n", data.id, data.type, data.message);
+    // receive 코드 간단하게 만들기
+
 
     // Close socket
     close(sock);

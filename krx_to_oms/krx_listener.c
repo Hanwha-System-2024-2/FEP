@@ -24,18 +24,6 @@ typedef struct {
 // socket
 
 #define MAX_CLIENTS 20
-#define BUFFER_SIZE 1024
-
-void print_kft_order(const kft_order *order) {
-    printf("kft_order:\n");
-    printf("  Header:\n");
-    printf("    tr_id: %d\n", order->hdr.tr_id);
-    printf("    length: %d\n", order->hdr.length);
-    printf("  transaction_code: %s\n", order->transaction_code);
-    printf("  user_id: %s\n", order->user_id);
-    printf("  time: %s\n", order->time);
-    printf("  reject_code: %s\n", order->reject_code);
-}
 
 void print_kft_execution(const kft_execution *execution) {
     printf("kft_execution:\n");
@@ -50,60 +38,11 @@ void print_kft_execution(const kft_execution *execution) {
     printf("  reject_code: %s\n", execution->reject_code);
 }
 
-// void pad_and_save(const char *src, size_t size, FILE *file) {
-//     char tmp[size];
-//     memset(tmp, ' ', size);       // Fill the entire field with spaces
-//     size_t copy_len = strlen(src); // Determine the actual content length
-//     if (copy_len > size) {
-//         copy_len = size;           // Truncate if content exceeds field size
-//     }
-//     memcpy(tmp, src, copy_len);
-//     fwrite(tmp , size, 1, file);        
-
-// }
-
-// void save_int_to_file(int value, FILE *file){
-//         char buffer[11];
-//         memset(buffer, '0', sizeof(buffer)); // 배열을 '0'으로 초기화
-    
-//         // 숫자를 문자열로 변환하고 buffer 끝부분에 채움
-//         snprintf(buffer + (11 - snprintf(NULL, 0, "%d", value)), sizeof(buffer), "%d", value);
-
-//         // printf("converted: %d\n", network_order);
-//         // 파일에 저장 (고정 크기: 4바이트)
-//         // fwrite(&network_order, sizeof(network_order), 1, file);
-//         size_t written = fwrite(buffer, sizeof(buffer), 1, file);
-//         if (written != 1) {
-//             perror("Failed to write to file");
-//         }
-
-//     }
-
-// void save_order_to_file(fkq_order *order, char filepath[256]) {
-//         FILE *file = fopen(filepath, "ab"); // 바이너리 쓰기 모드
-//         if (file == NULL) {
-//             perror("파일 열기 실패");
-//             exit(EXIT_FAILURE);
-//         }
-
-//         // Fill fields with fixed-length padding
-
-//         save_int_to_file(order->hdr.tr_id, file);
-//         save_int_to_file(order->hdr.length, file);
-
-//         pad_and_save(order->stock_code, sizeof(order->stock_code), file);
-//         pad_and_save(order->stock_name, sizeof(order->stock_name), file);
-//         pad_and_save(order->transaction_code, sizeof(order->transaction_code), file);
-//         pad_and_save(order->user_id, sizeof(order->user_id), file);
-
-//         fputc(order->order_type, file);
-//         save_int_to_file(order->quantity, file);
-//         pad_and_save(order->order_time, sizeof(order->order_time), file);
-//         save_int_to_file(order->price, file);
-//         pad_and_save(order->original_order, sizeof(order->original_order), file);
-
-//         fclose(file);
-//     }
+void save_order_to_file_bin(kft_execution *execution, char filepath[256]) {
+        FILE *file = fopen(filepath, "ab"); // 바이너리 쓰기 모드
+        fwrite(execution, sizeof(kft_execution), 1, file);    
+        fclose(file);
+}
 
 
 int main() {
@@ -111,8 +50,8 @@ int main() {
     mqd_t mq;
     struct mq_attr attr = {0};
     attr.mq_flags = 0;
-    attr.mq_maxmsg = 10;   // Maximum number of messages in the queue
-    attr.mq_msgsize = sizeof(int); // Maximum size of each message in bytes
+    attr.mq_maxmsg = 100;   // Maximum number of messages in the queue
+    attr.mq_msgsize = sizeof(kft_execution); // Maximum size of each message in bytes
     attr.mq_curmsgs = 0;   // Current number of messages in the queue
     
     // mmap memory code
@@ -147,7 +86,6 @@ int main() {
         exit(EXIT_FAILURE);
     }
 
-
     // Map the shared memory object
     KRX_W_count *w_count = mmap(NULL, shared_mem_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
     if (w_count == MAP_FAILED) {
@@ -172,9 +110,6 @@ int main() {
     int server_fd, activity;
     struct sockaddr_in address;
     socklen_t addrlen = sizeof(address);
-
-    // Buffer for receiving data
-    char buffer[BUFFER_SIZE];
 
     // Create server socket
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
@@ -231,13 +166,6 @@ int main() {
         exit(1);
     }
     
-    //56
-    // kft_execution temp1;
-    // printf("kft_execution size  = %d\n", sizeof(temp1));
-    
-    //60
-    // kft_order temp2;
-    // printf("kft_order size = %d\n", sizeof(temp2));
     while (1) {
         // Wait for an event
         activity = poll(fds, MAX_CLIENTS, -1); // Infinite timeout
@@ -275,31 +203,21 @@ int main() {
         // Check all client sockets for activity
         for (int i = 1; i < MAX_CLIENTS; i++) {
             if (fds[i].fd != -1 && (fds[i].revents & POLLIN)) {
-
-                ssize_t bytes_received;
-                char buffer[80]; // Large enough buffer for both structs
-                
-                // Receive data from the socket
-                bytes_received = recv(fds[i].fd, buffer, sizeof(buffer), 0);
-
+                kft_execution execution;
+                ssize_t bytes_received = recv(fds[i].fd, &execution, sizeof(execution), 0);
                 if (bytes_received <= 0) {
-                    perror("recv failed or connection closed");
-                    return 1;
-                }
+                    // Connection closed or error
+                    printf("Client disconnected\n");
+                    close(fds[i].fd);
+                    fds[i].fd = -1;
+                // } else if (bytes_received == sizeof(received_order.hdr.length)) {
+                } else if (bytes_received == sizeof(kft_execution)) {
 
-                printf("Received %ld bytes\n", bytes_received);
+                    printf("Execution received successfully, DB status will be updated.\n");
+                    print_kft_execution(&execution);
+                    // db update
 
-                if (bytes_received == sizeof(kft_execution)) {
-                    kft_execution execution_result;
-                    memcpy(&execution_result, buffer, sizeof(kft_execution));
-                    print_kft_execution(&execution_result);
-
-                } else if (bytes_received == sizeof(kft_order)) {
-                    kft_order order_accepted;
-                    memcpy(&order_accepted, buffer, sizeof(kft_order));
-                    print_kft_order(&order_accepted);
-
-                }
+                }      
             }
         }
     }

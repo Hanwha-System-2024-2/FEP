@@ -21,24 +21,17 @@ typedef struct {
 } R_count;
 
 
-#define QUEUE_NAME "/wc_queue"
-#define SUBMIT_QUEUE_NAME "/submit_queue"
-
+#define QUEUE_NAME "/krx_wc_queue"
 
 // socket
 #define MAX_CLIENTS 20
 
 
-
 int main() {
 
-    mqd_t mq, submit_mq;
+    mqd_t mq;
     struct mq_attr attr;
-    struct mq_attr submit_attr = {0};
-    submit_attr.mq_flags = 0;
-    submit_attr.mq_maxmsg = 100;   // Maximum number of messages in the queue
-    submit_attr.mq_msgsize = sizeof(fot_order_is_submitted); // Maximum size of each message in bytes
-    submit_attr.mq_curmsgs = 0;   // Current number of messages in the queue
+
     // TCP 송신 함수
     void send_order_to_krx(fkq_order *order) {
         int sock;
@@ -68,45 +61,13 @@ int main() {
 
         // 구조체 데이터 전송
         ssize_t sent_byte = send(sock, order, sizeof(fkq_order), 0);
-        
-        fot_order_is_submitted tx_result;
-            memset(&tx_result, 0, sizeof(fot_order_is_submitted)); // Initialize the struct
-            tx_result.hdr.tr_id = 7;
-            tx_result.hdr.length = sizeof(fot_order_is_submitted);
-            // tx_result.transaction_code = order->transaction_code;
-            strncpy(tx_result.transaction_code, order->transaction_code, sizeof(tx_result.transaction_code));
-            tx_result.transaction_code[sizeof(tx_result.transaction_code) - 1] = '\0'; // Null-terminate
-
-            strncpy(tx_result.user_id, order->user_id, sizeof(tx_result.user_id));
-            tx_result.user_id[sizeof(tx_result.user_id) - 1] = '\0'; // Null-terminate
-            
-            strncpy(tx_result.time, order->order_time, sizeof(tx_result.time));
-            tx_result.time[sizeof(tx_result.time) - 1] = '\0'; // Null-terminate
-
-
         if (sent_byte < 0) {
             perror("Failed to send data");
             close(sock);
-            strncpy(tx_result.reject_code, "E001", sizeof(tx_result.reject_code));
-            tx_result.reject_code[sizeof(tx_result.reject_code) - 1] = '\0'; // Null-terminate
-
-            // exit(EXIT_FAILURE);
-
-        } else {
-
-            printf("Order sent successfully to krx - %s:%d %d byte\n", KRX_IP, KRX_PORT, sent_byte);
-            strncpy(tx_result.reject_code, "0000", sizeof(tx_result.reject_code));
-            tx_result.reject_code[sizeof(tx_result.reject_code) - 1] = '\0'; // Null-terminate
-    
-        }
-        // Send the message 
-        if (mq_send(submit_mq, (const char *)&tx_result, sizeof(fot_order_is_submitted), 0) == -1) {
-            perror("mq_send");
-            mq_close(mq);
             exit(EXIT_FAILURE);
+        } else {
+            printf("Order sent successfully to %s:%d %d byte\n", KRX_IP, KRX_PORT, sent_byte);
         }
-
-        printf("Message sent successfully to submit_mq\n");
 
         // 소켓 종료
         // close(sock);
@@ -192,6 +153,9 @@ int main() {
         exit(EXIT_FAILURE);
     }
 
+    r_count->rc = 0; // Initialize write counter to 0
+
+
     // Initialize shared memory if it is newly created
     if (is_initialized) {
         r_count->rc = 0; // Initialize write counter to 0
@@ -216,7 +180,6 @@ int main() {
         strncpy(filepath, "./received_data.txt", sizeof(filepath));
     }
     printf("test1\n");
-
     // Open the message queue
     mq = mq_open(QUEUE_NAME, O_RDONLY);
     if (mq == -1) {
@@ -224,16 +187,7 @@ int main() {
         exit(1);
     }
     printf("message queue opened\n");
-
-     // Open the sender queue
-    submit_mq = mq_open(SUBMIT_QUEUE_NAME, O_CREAT | O_WRONLY, 0666, NULL, &submit_attr);
-    if (submit_mq == -1) {
-        perror("mq_open (sender)");
-        mq_close(mq);
-        exit(EXIT_FAILURE);
-    }
-    printf("submit message queue opened.\n");
-
+    
     // Get queue attributes
     if (mq_getattr(mq, &attr) == -1) {
         perror("mq_getattr");
