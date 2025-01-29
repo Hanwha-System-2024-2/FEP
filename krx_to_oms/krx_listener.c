@@ -212,7 +212,10 @@ int main() {
                     fds[i].fd = -1;
                 // } else if (bytes_received == sizeof(received_order.hdr.length)) {
                 } else if (bytes_received == sizeof(kft_execution)) {
-
+                    if (execution.hdr.tr_id !=11 ) { // Example valid range
+                    printf("skip to process Invalid tr_id: %d\n", execution.hdr.tr_id);
+                    continue; // Skip processing
+                    }
                     printf("Execution received successfully, DB status will be updated.\n");
                     print_kft_execution(&execution);
                     // db update

@@ -40,38 +40,19 @@ int main() {
     submit_attr.mq_msgsize = sizeof(fot_order_is_submitted); // Maximum size of each message in bytes
     submit_attr.mq_curmsgs = 0;   // Current number of messages in the queue
     // TCP 송신 함수
-    void send_order_to_krx(fkq_order *order) {
-        int sock;
-        struct sockaddr_in server_addr;
-
-        // 소켓 생성
-        if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-            perror("Socket creation failed");
-            exit(EXIT_FAILURE);
-        }
-
-        // 서버 주소 설정
-        server_addr.sin_family = AF_INET;
-        server_addr.sin_port = htons(KRX_PORT);
-        if (inet_pton(AF_INET, KRX_IP, &server_addr.sin_addr) <= 0) {
-            perror("Invalid IP address or format");
-            close(sock);
-            exit(EXIT_FAILURE);
-        }
-
-        // 서버 연결
-        if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-            perror("Connection to the server failed");
-            close(sock);
-            exit(EXIT_FAILURE);
-        }
+    void send_order_to_krx(fkq_order *order, int sock) {
 
         // 구조체 데이터 전송
         ssize_t sent_byte = send(sock, order, sizeof(fkq_order), 0);
         
         fot_order_is_submitted tx_result;
-            memset(&tx_result, 0, sizeof(fot_order_is_submitted)); // Initialize the struct
-            tx_result.hdr.tr_id = 7;
+        memset(&tx_result, 0, sizeof(fot_order_is_submitted)); // Initialize the struct
+            
+        if (sent_byte < 0) {
+            perror("Failed to send data");
+            close(sock);
+
+            tx_result.hdr.tr_id = 10;
             tx_result.hdr.length = sizeof(fot_order_is_submitted);
             // tx_result.transaction_code = order->transaction_code;
             strncpy(tx_result.transaction_code, order->transaction_code, sizeof(tx_result.transaction_code));
@@ -83,10 +64,6 @@ int main() {
             strncpy(tx_result.time, order->order_time, sizeof(tx_result.time));
             tx_result.time[sizeof(tx_result.time) - 1] = '\0'; // Null-terminate
 
-
-        if (sent_byte < 0) {
-            perror("Failed to send data");
-            close(sock);
             strncpy(tx_result.reject_code, "E001", sizeof(tx_result.reject_code));
             tx_result.reject_code[sizeof(tx_result.reject_code) - 1] = '\0'; // Null-terminate
 
@@ -95,8 +72,16 @@ int main() {
         } else {
 
             printf("Order sent successfully to krx - %s:%d %d byte\n", KRX_IP, KRX_PORT, sent_byte);
-            strncpy(tx_result.reject_code, "0000", sizeof(tx_result.reject_code));
-            tx_result.reject_code[sizeof(tx_result.reject_code) - 1] = '\0'; // Null-terminate
+
+            while(1){
+                ssize_t bytes_received = recv(sock, &tx_result, sizeof(fot_order_is_submitted), 0);
+                if (bytes_received < 0) {
+                    // Connection closed or error
+                    printf("Error receiving data\n");
+                } else if (bytes_received == 0) {
+                    printf("Connection closed by server.\n");
+                } else if (bytes_received == sizeof(fot_order_is_submitted)) break;
+            }               
     
         }
         // Send the message 
@@ -112,7 +97,7 @@ int main() {
         // close(sock);
     }
 
-    void read_order_from_bin_file(const char *filepath, int start, int end, R_count *r_count) {
+    void read_order_from_bin_file(const char *filepath, int start, int end, R_count *r_count, int sock) {
 
         fkq_order order;
         memset(&order, 0, sizeof(order)); // Initialize the struct
@@ -130,7 +115,7 @@ int main() {
             }
             fread(&order, sizeof(fkq_order), 1, file);
 
-            send_order_to_krx(&order);
+            send_order_to_krx(&order, sock);
             r_count->rc++;
             printf("current value rc = %d\n", r_count->rc);
             
@@ -157,10 +142,12 @@ int main() {
 
    // Create or open the shared memory object
     int shm_fd = shm_open(shared_mem_name, O_CREAT | O_RDWR | O_EXCL, 0666);
+    printf("First shm_fd: %d\n", shm_fd);
     if (shm_fd == -1) {
         if (errno == EEXIST) {
             // Shared memory already exists
             shm_fd = shm_open(shared_mem_name, O_RDWR, 0666);
+            printf("Second shm_fd: %d\n", shm_fd);
             if (shm_fd == -1) {
                 perror("shm_open failed");
                 exit(EXIT_FAILURE);
@@ -201,11 +188,6 @@ int main() {
         printf("Shared memory already exists. rc = %d\n", r_count->rc);
     }
 
-    // socket code
-    int server_fd, new_socket, activity;
-    struct sockaddr_in address;
-    socklen_t addrlen = sizeof(address);
-
     // set file dir structure
     const char *home_dir = getenv("HOME");
     char filepath[256];
@@ -242,6 +224,33 @@ int main() {
 
     int received_wc; 
 
+    // socket code
+    int sock;
+    struct sockaddr_in server_addr;
+
+    // 소켓 생성
+    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        perror("Socket creation failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // 서버 주소 설정
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(KRX_PORT);
+    if (inet_pton(AF_INET, KRX_IP, &server_addr.sin_addr) <= 0) {
+        perror("Invalid IP address or format");
+        close(sock);
+        exit(EXIT_FAILURE);
+    }
+
+    // 서버 연결
+    if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        perror("Connection to the server failed");
+        close(sock);
+        exit(EXIT_FAILURE);
+    }
+
+
     while(1){
         // Receive the message
         ssize_t bytes_read = mq_receive(mq, (char *)&received_wc, attr.mq_msgsize, NULL);
@@ -253,7 +262,7 @@ int main() {
         // Convert the byte array back to a long
         printf("Received: %d\n", received_wc);
         if(received_wc > r_count->rc){
-            read_order_from_bin_file(filepath, r_count->rc, received_wc, r_count);
+            read_order_from_bin_file(filepath, r_count->rc, received_wc, r_count, sock);
         }
 
     }

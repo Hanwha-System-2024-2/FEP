@@ -256,7 +256,6 @@ int main() {
         for (int i = 1; i < MAX_CLIENTS; i++) {
             if (fds[i].fd != -1 && (fds[i].revents & POLLIN)) {
                 fkq_order received_order;
-                // memset(&received_order, 0, sizeof(received_order));
                 ssize_t bytes_received = recv(fds[i].fd, &received_order, sizeof(received_order), 0);
                 if (bytes_received <= 0) {
                     // Connection closed or error
@@ -266,8 +265,12 @@ int main() {
                 // } else if (bytes_received == sizeof(received_order.hdr.length)) {
                 } else if (bytes_received == sizeof(received_order)) {
 
-                    printf("Order received successfully.\n");
-
+     
+                    if (received_order.hdr.tr_id !=9 ) { // Example valid range
+                    printf("skip to process Invalid tr_id: %d\n", received_order.hdr.tr_id);
+                    continue; // Skip processing
+                    }
+                   printf("Order received successfully.\n");
                     printf("%d,%d,%s,%s,%s,%s,%c,%d,%s,%d,%s\n",
                             received_order.hdr.tr_id,
                             received_order.hdr.length,
@@ -307,7 +310,14 @@ int main() {
 
                     print_fot_order_is_submitted(&submit_result);
 
+
                     // send back to oms by connected socket
+                        // for jmeter load test
+                    // int response_size = sizeof(submit_result);
+                    // send(fds[i].fd, &response_size, sizeof(response_size), 0); // Send size first
+                    char ack_message[] = "ACK\n";
+                    send(fds[i].fd, ack_message, sizeof(ack_message), 0);
+
                     ssize_t bytes_sent = send(fds[i].fd, &submit_result, sizeof(fot_order_is_submitted), 0);
                     if (bytes_sent < 0) {
                         perror("Failed to send data to connected socket");
