@@ -10,11 +10,16 @@
 #include <mqueue.h>
 #include <oms_fep_krx_struct.h>
 #include <envs.h>
+#include <mysql/mysql.h>
 
 // shared memory
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+
+//log
+#include <stdarg.h>
+#include <time.h>
 
 typedef struct {
     int wc; // Write counter
@@ -23,64 +28,91 @@ typedef struct {
 #define QUEUE_NAME "/wc_queue"
 #define SUBMIT_QUEUE_NAME "/submit_queue"
 // socket
-#define MAX_CLIENTS 10
+#define MAX_CLIENTS 20
 #define BUFFER_SIZE 1024
+
+#define LOG_FILE_PATH "/home/ubuntu/logs/oms_listener.log"
+FILE *log_file = NULL;
+
+// Initialize logging
+void init_log() {
+    mkdir("/home/ubuntu/logs", 0777);
+    log_file = fopen(LOG_FILE_PATH, "a");
+    if (!log_file) {
+        perror("Failed to open log file");
+        exit(EXIT_FAILURE);
+    }
+}
+
+// Log function with level and module
+void log_message(const char *level, const char *module, const char *format, ...) {
+    if (!log_file) return;
+
+    time_t now = time(NULL);
+    struct tm *tm_info = localtime(&now);
+    char time_buffer[20];
+
+    strftime(time_buffer, sizeof(time_buffer), "%Y-%m-%d %H:%M:%S", tm_info);
+    fprintf(log_file, "[%s] [%s] [%s] ", time_buffer, level, module);
+
+    va_list args;
+    va_start(args, format);
+    vfprintf(log_file, format, args);
+    va_end(args);
+
+    fflush(log_file);
+}
+
+// Function to clean up the log file
+void close_log() {
+    if (log_file) {
+        fflush(log_file);  // Ensure all data is written before closing
+        fclose(log_file);
+    }
+}
 
 // Function to print the elements of fot_order_is_submitted
 void print_fot_order_is_submitted(const fot_order_is_submitted *submit_result) {
-    printf("Header:\n");
-    printf("  Transaction ID: %d\n", submit_result->hdr.tr_id);
-    printf("  Length: %d\n", submit_result->hdr.length);
-    printf("Transaction Code: %s\n", submit_result->transaction_code);
-    printf("User ID: %s\n", submit_result->user_id);
-    printf("Response Time: %s\n", submit_result->time);
-    printf("Reject Code: %s\n", submit_result->reject_code);
+    log_message("DEBUG", "order", "  Transaction ID: %d\n", submit_result->hdr.tr_id);
+    log_message("DEBUG", "order","  Length: %d\n", submit_result->hdr.length);
+    log_message("DEBUG", "order","Transaction Code: %s\n", submit_result->transaction_code);
+    log_message("DEBUG", "order","User ID: %s\n", submit_result->user_id);
+    log_message("DEBUG", "order","Response Time: %s\n", submit_result->time);
+    log_message("DEBUG", "order","Reject Code: %s\n", submit_result->reject_code);
 }
 
-void save_int_to_file(int value, FILE *file){
-        char buffer[11];
-        memset(buffer, '0', sizeof(buffer)); // 배열을 '0'으로 초기화
-    
-        // 숫자를 문자열로 변환하고 buffer 끝부분에 채움
-        snprintf(buffer + (11 - snprintf(NULL, 0, "%d", value)), sizeof(buffer), "%d", value);
-
-        // printf("converted: %d\n", network_order);
-        // 파일에 저장 (고정 크기: 4바이트)
-        // fwrite(&network_order, sizeof(network_order), 1, file);
-        size_t written = fwrite(buffer, sizeof(buffer), 1, file);
-        if (written != 1) {
-            perror("Failed to write to file");
-        }
-
-    }
-
-void save_order_to_file_bin(fkq_order *order, char filepath[256]) {
-        FILE *file = fopen(filepath, "ab"); // 바이너리 쓰기 모드
+void save_order_to_file_bin(fkq_order *order, FILE *file) {
         fwrite(order, sizeof(fkq_order), 1, file);    
-        fclose(file);
-
+        fflush(file);
 }
-
-void print_buffer_contents(const char *buffer, size_t size) {
-    printf("Buffer contents (size = %lu):\n", size);
-    for (size_t i = 0; i < size; i++) {
-        // Print each byte in hexadecimal and as a character
-        printf("0x%02X (%c) ", (unsigned char)buffer[i],
-               (buffer[i] >= 32 && buffer[i] <= 126) ? buffer[i] : '.');
-        if ((i + 1) % 16 == 0) {
-            printf("\n"); // Newline every 16 bytes for readability
-        }
-    }
-    printf("\n");
-}
-
 
 int main() {
+    
+    init_log();
+    
+    // mysql connection
+    MYSQL *conn;
+    MYSQL_RES *res;
+    MYSQL_ROW row;
+    
+    // MySQL 초기화
+    conn = mysql_init(NULL);
+    if (conn == NULL) {
+        log_message("ERROR", "db", "mysql_init() failed\n");
+        return EXIT_FAILURE;
+    }
+    // 데이터베이스 연결
+    if (mysql_real_connect(conn, MYSQL_IP, MYSQL_USER, MYSQL_PW, MYSQL_DBNAME, 0, NULL, 0) == NULL) {
+        log_message("ERROR", "db", "mysql_real_connect() failed: %s\n", mysql_error(conn));
+        mysql_close(conn);
+        return EXIT_FAILURE;
+    }
 
+    // message queue
     mqd_t mq, submit_mq;
     struct mq_attr attr = {0};
     attr.mq_flags = 0;
-    attr.mq_maxmsg = 100;   // Maximum number of messages in the queue
+    attr.mq_maxmsg = 200;   // Maximum number of messages in the queue
     attr.mq_msgsize = sizeof(int); // Maximum size of each message in bytes
     attr.mq_curmsgs = 0;   // Current number of messages in the queue
     
@@ -98,11 +130,11 @@ int main() {
             // Shared memory already exists
             shm_fd = shm_open(shared_mem_name, O_RDWR, 0666);
             if (shm_fd == -1) {
-                perror("shm_open failed");
+                log_message("ERROR", "shm", "shm_open failed");
                 exit(EXIT_FAILURE);
             }
         } else {
-            perror("shm_open failed");
+            log_message("ERROR", "shm", "shm_open failed");
             exit(EXIT_FAILURE);
         }
     } else {
@@ -112,7 +144,7 @@ int main() {
 
     // Set size of the shared memory object
     if (ftruncate(shm_fd, shared_mem_size) == -1) {
-        perror("ftruncate failed");
+        log_message("ERROR", "shm","ftruncate failed");
         close(shm_fd);
         shm_unlink(shared_mem_name);
         exit(EXIT_FAILURE);
@@ -122,7 +154,7 @@ int main() {
     // Map the shared memory object
     W_count *w_count = mmap(NULL, shared_mem_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
     if (w_count == MAP_FAILED) {
-        perror("mmap failed");
+        log_message("ERROR", "shm","mmap failed");
         close(shm_fd);
         shm_unlink(shared_mem_name);
         exit(EXIT_FAILURE);
@@ -131,10 +163,10 @@ int main() {
     // Initialize shared memory if it is newly created
     if (is_initialized) {
         w_count->wc = 0; // Initialize write counter to 0
-        printf("Shared memory initialized. wr = %d\n", w_count->wc);
-        printf("Shared memory initialized. PID: %d\n", getpid());
+        log_message("DEBUG", "shm", "Shared memory initialized. wr = %d\n", w_count->wc);
+        log_message("DEBUG", "shm","Shared memory initialized. PID: %d\n", getpid());
     } else {
-        printf("Shared memory already exists. wc = %d\n", w_count->wc);
+        log_message("DEBUG", "shm", "Shared memory already exists. wc = %d\n", w_count->wc);
     }
 
     // socket code
@@ -147,7 +179,7 @@ int main() {
 
     // Create server socket
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
-        perror("Socket failed");
+        log_message("ERROR", "socket", "Socket failed");
         exit(EXIT_FAILURE);
     }
 
@@ -158,19 +190,19 @@ int main() {
 
     // Bind the socket
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-        perror("Bind failed");
+        log_message("ERROR", "socket","Bind failed");
         close(server_fd);
         exit(EXIT_FAILURE);
     }
 
     // Start listening
     if (listen(server_fd, MAX_CLIENTS) < 0) {
-        perror("Listen failed");
+        log_message("ERROR", "socket", "Listen failed");
         close(server_fd);
         exit(EXIT_FAILURE);
     }
     int client_sockets[MAX_CLIENTS] = {0}; // Track client sockets
-    printf("Server listening on port %d\n", FEP_OMS_R_PORT);
+    log_message("DEBUG", "socket", "Server listening on port %d\n", FEP_OMS_R_PORT);
 
     // Poll array to monitor multiple file descriptors
     struct pollfd fds[MAX_CLIENTS];
@@ -192,30 +224,35 @@ int main() {
         // Fallback to current directory if $HOME is not set
         strncpy(filepath, "./received_data.txt", sizeof(filepath));
     }
+    FILE *file = fopen(filepath, "ab");
+    if (file == NULL) {
+        log_message("ERROR", "file", "Error opening file");
+        return;
+    }
 
     // Open the message queue
     mq = mq_open(QUEUE_NAME, O_CREAT | O_WRONLY, 0644, NULL, &attr);
     if (mq == -1) {
-        perror("mq_open");
+        log_message("ERROR", "mq", "mq_open failed");
         exit(1);
     }
-    printf("wc queue opened.\n");
+    log_message("DEBUG", "mq","wc queue opened.\n");
 
      // Open the sender queue
     submit_mq = mq_open(SUBMIT_QUEUE_NAME, O_RDONLY);
     if (submit_mq == -1) {
-        perror("mq_open (sender)");
+        log_message("ERROR", "mq","mq_open (submit mq) failed");
         mq_close(mq);
         exit(EXIT_FAILURE);
     }
 
       // Get queue attributes
     if (mq_getattr(submit_mq, &submit_attr) == -1) {
-        perror("mq_getattr");
+        log_message("ERROR", "mq", "mq_getattr");
         mq_close(mq);
         exit(EXIT_FAILURE);
     }
-    printf("submit message queue opened.\n");
+    log_message("DEBUG", "mq","submit message queue opened.\n");
 
     
     while (1) {
@@ -223,7 +260,7 @@ int main() {
         activity = poll(fds, MAX_CLIENTS, -1); // Infinite timeout
 
         if (activity < 0) {
-            perror("Poll error");
+            log_message("ERROR", "socket", "Poll error");
             break;
         }
 
@@ -232,13 +269,13 @@ int main() {
             struct sockaddr_in client_addr;
             socklen_t client_addr_len = sizeof(client_addr);
             int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
-
+      
             if (client_fd < 0) {
-                perror("Accept failed");
+                log_message("ERROR", "socket", "Accept failed");
                 continue;
             }
 
-            printf("New connection from %s:%d\n",
+            log_message("INFO", "socket", "New connection from %s:%d\n",
                    inet_ntoa(address.sin_addr), ntohs(address.sin_port));
 
             // Add new socket to poll array
@@ -259,19 +296,18 @@ int main() {
                 ssize_t bytes_received = recv(fds[i].fd, &received_order, sizeof(received_order), 0);
                 if (bytes_received <= 0) {
                     // Connection closed or error
-                    printf("Client disconnected\n");
+                    log_message("INFO", "socket", "Client disconnected\n");
                     close(fds[i].fd);
                     fds[i].fd = -1;
                 // } else if (bytes_received == sizeof(received_order.hdr.length)) {
                 } else if (bytes_received == sizeof(received_order)) {
-
      
                     if (received_order.hdr.tr_id !=9 ) { // Example valid range
-                    printf("skip to process Invalid tr_id: %d\n", received_order.hdr.tr_id);
+                    log_message("INFO", "socket", "skip to process Invalid tr_id: %d\n", received_order.hdr.tr_id);
                     continue; // Skip processing
                     }
-                   printf("Order received successfully.\n");
-                    printf("%d,%d,%s,%s,%s,%s,%c,%d,%s,%d,%s\n",
+                    log_message("INFO", "order", "Order received successfully.\n");
+                    log_message("DEBUG", "order","%d,%d,%s,%s,%s,%s,%c,%d,%s,%d,%s\n",
                             received_order.hdr.tr_id,
                             received_order.hdr.length,
                             received_order.stock_code,
@@ -285,16 +321,34 @@ int main() {
                             received_order.original_order);
                     
                     // Save the order to file
-                    save_order_to_file_bin(&received_order, filepath);
+                    save_order_to_file_bin(&received_order, file);
                     w_count->wc++;
+                    log_message("INFO", "shm", "wc increased. wc = %d\n", w_count->wc);
                     printf("wc increased. wc = %d\n", w_count->wc);
+                    // db insert
+                    // const char *insert_query = "INSERT INTO tx_history (stock_code, stock_name, transaction_code, user_id, order_type, quantity, order_time, price, original_order, status) VALUES (received_order.stock_code, received_order.stock_name, received_order.transaction_code, received_order.user_id, received_order.order_type, received_order.quantity, received_order.order_time, received_order.price, received_order.original_order, 'W')";
+                    char insert_query[512];  // Large enough to hold the full query
+                    snprintf(insert_query, sizeof(insert_query),
+                            "INSERT INTO tx_history (stock_code, stock_name, transaction_code, user_id, order_type, quantity, order_time, price, original_order, status) "
+                            "VALUES ('%s', '%s', '%s', '%s', '%c', %d, '%s', %d, '%s', 'W')",
+                            received_order.stock_code, received_order.stock_name, received_order.transaction_code,
+                            received_order.user_id, received_order.order_type, received_order.quantity,
+                            received_order.order_time, received_order.price, received_order.original_order ? received_order.original_order : "NULL");
+
+                        if (mysql_query(conn, insert_query)) {
+                            log_message("ERROR", "db", "INSERT query failed: %s\n", mysql_error(conn));
+                            mysql_close(conn);
+                            // mysql con 끊고 프로세스 죽여버리기 보다 에러코드 oms에 반환하고 그다음 처리하는게..
+                            return EXIT_FAILURE;
+                        }
+                    log_message("INFO", "DB", "Data is inserted into DB successfully!\n");
 
                     //send wc
                     if(mq_send(mq, (char *)&w_count->wc, sizeof(int), 0)==-1){
-                        perror("mq_send");
+                        log_message("ERROR", "mq", "mq_send failed: could be mq full");
                         exit(1);
                     }           
-                    printf("Msg sent: %d", w_count->wc);   
+                    log_message("DEBUG", "mq", "Msg sent: %d", w_count->wc);   
 
                     // receive submit_result from queue
                     fot_order_is_submitted submit_result;
@@ -303,7 +357,7 @@ int main() {
                     // ssize_t bytes_read = mq_receive(submit_mq, buffer, sizeof(fot_order_is_submitted), NULL);
 
                     if (bytes_read == -1) {
-                        perror("submit_mq_receive");
+                        log_message("ERROR", "mq","submit_mq_receive failed");
                         mq_close(submit_mq);
                         exit(1);
                     }
@@ -315,21 +369,21 @@ int main() {
                         // for jmeter load test
                     // int response_size = sizeof(submit_result);
                     // send(fds[i].fd, &response_size, sizeof(response_size), 0); // Send size first
-                    char ack_message[] = "ACK\n";
-                    send(fds[i].fd, ack_message, sizeof(ack_message), 0);
+                    // char ack_message[] = "ACK\n";
+                    // send(fds[i].fd, ack_message, sizeof(ack_message), 0);
 
                     ssize_t bytes_sent = send(fds[i].fd, &submit_result, sizeof(fot_order_is_submitted), 0);
                     if (bytes_sent < 0) {
-                        perror("Failed to send data to connected socket");
+                        log_message("ERROR", "socket", "Failed to send data to connected socket");
                     } else if (bytes_sent < sizeof(fot_order_is_submitted)) {
-                        fprintf(stderr, "Partial data sent. Expected %lu bytes, sent %ld bytes.\n",
+                        log_message("ERROR", "socket", "Partial data sent. Expected %lu bytes, sent %ld bytes.\n",
                                 sizeof(fot_order_is_submitted), bytes_sent);
                     } else {
-                        printf("Successfully sent response to OMS via connected socket. Sent %ld bytes.\n", bytes_sent);
+                        log_message("INFO", "socket", "Successfully sent response to OMS via connected socket. Sent %ld bytes.\n", bytes_sent);
                     }
 
                 } else {
-                    printf(stderr, "Incomplete data received. Expected %lu bytes, got %ld bytes.\n", sizeof(fkq_order), bytes_received);
+                    log_message("ERROR", "socket", "Incomplete data received. Expected %lu bytes, got %ld bytes.\n", sizeof(fkq_order), bytes_received);
                 }    
             }
         }
@@ -338,6 +392,9 @@ int main() {
     close(server_fd);
     // Close the message queue
     mq_close(mq);
+
+   // 연결 닫기
+    mysql_close(conn);
 
     return 0;
 }

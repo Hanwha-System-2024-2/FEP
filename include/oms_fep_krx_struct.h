@@ -32,7 +32,7 @@ typedef struct {
     hdr hdr;
     char transaction_code[7]; // 거래코드 o
     int status_code;          // 상태 코드 (0: 체결, 1: 취소, 99: 오류)
-    char time[15];            // 응답시간 (YYYYMMDDHHMMSS) o
+    char time[15];            // 응답시간 (YYYYMMDDHHMMSS)
     int executed_price;       // 체결 가격
     char original_order[7];   // 원주문번호
     char reject_code[7];      // 거부사유코드 (문자열)

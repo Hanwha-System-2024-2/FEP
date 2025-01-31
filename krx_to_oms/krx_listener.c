@@ -16,49 +16,96 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+//log
+#include <stdarg.h>
+#include <time.h>
+
 typedef struct {
     int wc; // Write counter
 } KRX_W_count;
 
-#define QUEUE_NAME "/krx_wc_queue"
+#define QUEUE_NAME "/execution_wc_queue"
+
 // socket
-
 #define MAX_CLIENTS 20
+#define LOG_FILE_PATH "/home/ubuntu/logs/krx_listener.log"
+FILE *log_file = NULL;
 
-void print_kft_execution(const kft_execution *execution) {
-    printf("kft_execution:\n");
-    printf("  Header:\n");
-    printf("    tr_id: %d\n", execution->hdr.tr_id);
-    printf("    length: %d\n", execution->hdr.length);
-    printf("  transaction_code: %s\n", execution->transaction_code);
-    printf("  status_code: %d\n", execution->status_code);
-    printf("  time: %s\n", execution->time);
-    printf("  executed_price: %d\n", execution->executed_price);
-    printf("  original_order: %s\n", execution->original_order);
-    printf("  reject_code: %s\n", execution->reject_code);
+
+// Initialize logging
+void init_log() {
+    mkdir("/home/ubuntu/logs", 0777);
+    log_file = fopen(LOG_FILE_PATH, "a");
+    if (!log_file) {
+        perror("Failed to open log file");
+        exit(EXIT_FAILURE);
+    }
 }
 
-void save_order_to_file_bin(kft_execution *execution, char filepath[256]) {
-        FILE *file = fopen(filepath, "ab"); // 바이너리 쓰기 모드
+// Log function with level and module
+void log_message(const char *level, const char *module, const char *format, ...) {
+    if (!log_file) return;
+
+    time_t now = time(NULL);
+    struct tm *tm_info = localtime(&now);
+    char time_buffer[20];
+
+    strftime(time_buffer, sizeof(time_buffer), "%Y-%m-%d %H:%M:%S", tm_info);
+    fprintf(log_file, "[%s] [%s] [%s] ", time_buffer, level, module);
+
+    va_list args;
+    va_start(args, format);
+    vfprintf(log_file, format, args);
+    va_end(args);
+
+    fflush(log_file);  //  Ensure data is written immediately
+}
+
+// Function to clean up the log file
+void close_log() {
+    if (log_file) {
+        fflush(log_file);  // Ensure all data is written before closing
+        fclose(log_file);
+    }
+}
+
+void print_kft_execution(const kft_execution *execution) {
+    log_message("INFO", "execution", "krx_execution:\n");
+    log_message("INFO", "execution","  Header:\n");
+    log_message("INFO", "execution", "    tr_id: %d\n", execution->hdr.tr_id);
+    log_message("INFO", "execution","    length: %d\n", execution->hdr.length);
+    log_message("INFO", "execution","  transaction_code: %s\n", execution->transaction_code);
+    log_message("INFO", "execution","  status_code: %d\n", execution->status_code);
+    log_message("INFO", "execution","  time: %s\n", execution->time);
+    log_message("INFO", "execution","  executed_price: %d\n", execution->executed_price);
+    log_message("INFO", "execution","  original_order: %s\n", execution->original_order);
+    log_message("INFO", "execution","  reject_code: %s\n", execution->reject_code);
+}
+
+void save_order_to_file_bin(kft_execution *execution, FILE *file) {
         fwrite(execution, sizeof(kft_execution), 1, file);    
-        fclose(file);
+        fflush(file);
 }
 
 
 int main() {
-
+    printf("0");
+    fflush(stdout);
+    init_log();
     mqd_t mq;
     struct mq_attr attr = {0};
     attr.mq_flags = 0;
-    attr.mq_maxmsg = 100;   // Maximum number of messages in the queue
-    attr.mq_msgsize = sizeof(kft_execution); // Maximum size of each message in bytes
+    attr.mq_maxmsg = 200;   // Maximum number of messages in the queue
+    attr.mq_msgsize = sizeof(int); // Maximum size of each message in bytes
     attr.mq_curmsgs = 0;   // Current number of messages in the queue
+    printf("1");
     
     // mmap memory code
     const char *shared_mem_name = "/KRX_W_count";
     const size_t shared_mem_size = sizeof(KRX_W_count);
     int is_initialized = 0; // Flag to track if shared memory is newly created
-
+    printf("2");
+    fflush(stdout);
    // Create or open the shared memory object
     int shm_fd = shm_open(shared_mem_name, O_CREAT | O_RDWR | O_EXCL, 0666);
     if (shm_fd == -1) {
@@ -66,21 +113,22 @@ int main() {
             // Shared memory already exists
             shm_fd = shm_open(shared_mem_name, O_RDWR, 0666);
             if (shm_fd == -1) {
-                perror("shm_open failed");
+                log_message("ERROR", "shm", "shm_open failed");
                 exit(EXIT_FAILURE);
             }
         } else {
-            perror("shm_open failed");
+            log_message("ERROR", "shm", "shm_open failed");
             exit(EXIT_FAILURE);
         }
     } else {
         // This is the first time the shared memory is being created
         is_initialized = 1;
     }
-
+printf("3");
+fflush(stdout);
     // Set size of the shared memory object
     if (ftruncate(shm_fd, shared_mem_size) == -1) {
-        perror("ftruncate failed");
+        log_message("ERROR", "shm", "ftruncate failed");
         close(shm_fd);
         shm_unlink(shared_mem_name);
         exit(EXIT_FAILURE);
@@ -89,23 +137,23 @@ int main() {
     // Map the shared memory object
     KRX_W_count *w_count = mmap(NULL, shared_mem_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
     if (w_count == MAP_FAILED) {
-        perror("mmap failed");
+        log_message("ERROR", "shm","mmap failed");
         close(shm_fd);
         shm_unlink(shared_mem_name);
         exit(EXIT_FAILURE);
     }
-
-    w_count->wc = 0;
-
+printf("4");
+fflush(stdout);
     // Initialize shared memory if it is newly created
     if (is_initialized) {
         w_count->wc = 0; // Initialize write counter to 0
-        printf("Shared memory initialized. wr = %d\n", w_count->wc);
-        printf("Shared memory initialized. PID: %d\n", getpid());
+        log_message("DEBUG", "shm", "Shared memory initialized. wr = %d\n", w_count->wc);
+        log_message("DEBUG", "shm","Shared memory initialized. PID: %d\n", getpid());
     } else {
-        printf("Shared memory already exists. wc = %d\n", w_count->wc);
+        log_message("DEBUG", "shm", "Shared memory already exists. wc = %d\n", w_count->wc);
     }
-
+printf("5");
+fflush(stdout);
     // socket code
     int server_fd, activity;
     struct sockaddr_in address;
@@ -113,10 +161,11 @@ int main() {
 
     // Create server socket
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
-        perror("Socket failed");
+        log_message("ERROR", "socket", "Socket failed");
         exit(EXIT_FAILURE);
     }
-
+printf("6");
+fflush(stdout);
     // Configure server address
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY; // Listen on all network interfaces
@@ -124,19 +173,21 @@ int main() {
 
     // Bind the socket
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-        perror("Bind failed");
+        log_message("ERROR", "socket","Bind failed");
         close(server_fd);
         exit(EXIT_FAILURE);
     }
 
     // Start listening
     if (listen(server_fd, MAX_CLIENTS) < 0) {
-        perror("Listen failed");
+        log_message("ERROR", "socket", "Listen failed");
         close(server_fd);
         exit(EXIT_FAILURE);
     }
+    printf("7");
+    fflush(stdout);
     int client_sockets[MAX_CLIENTS] = {0}; // Track client sockets
-    printf("Server listening on port %d\n", FEP_KRX_R_PORT);
+    log_message("DEBUG", "socket", "Server listening on port %d\n", FEP_KRX_R_PORT);
 
     // Poll array to monitor multiple file descriptors
     struct pollfd fds[MAX_CLIENTS];
@@ -148,7 +199,8 @@ int main() {
     for (int i = 1; i < MAX_CLIENTS; i++) {
         fds[i].fd = -1; // Initialize all other file descriptors
     }
-
+printf("8");
+fflush(stdout);
     // set file dir structure
     const char *home_dir = getenv("HOME");
     char filepath[256];
@@ -159,6 +211,13 @@ int main() {
         strncpy(filepath, "./krx_received_data.txt", sizeof(filepath));
     }
 
+    FILE *file = fopen(filepath, "ab");
+    if (file == NULL) {
+        log_message("ERROR", "file", "Error opening file");
+        return;
+    }
+printf("9");
+fflush(stdout);
     // Open the message queue
     mq = mq_open(QUEUE_NAME, O_CREAT | O_WRONLY, 0644, NULL, &attr);
     if (mq == -1) {
@@ -216,10 +275,26 @@ int main() {
                     printf("skip to process Invalid tr_id: %d\n", execution.hdr.tr_id);
                     continue; // Skip processing
                     }
-                    printf("Execution received successfully, DB status will be updated.\n");
-                    print_kft_execution(&execution);
-                    // db update
+                    if (strcmp(execution.reject_code, "0000") == 0) {
+                        printf("Reject code is 0000: Order is successful\n");
+                        printf("Execution received successfully, DB status will be updated.\n");
+                        print_kft_execution(&execution);
 
+                        save_order_to_file_bin(&execution, file);
+                        w_count->wc++;
+                        log_message("INFO", "shm", "krx_wc increased. wc = %d\n", w_count->wc);
+                        printf("krx_wc increased. wc = %d\n", w_count->wc);
+
+                        //send wc
+                        if(mq_send(mq, (char *)&w_count->wc, sizeof(int), 0)==-1){
+                            log_message("ERROR", "mq", "mq_send failed: could be mq full");
+                            exit(1);
+                        }           
+                        log_message("DEBUG", "mq", "krx_w_cnt sent: %d", w_count->wc);
+                        
+                    } else {
+                        printf("Reject code is NOT 0000: Order failed, reason: %s\n", execution.reject_code);
+                    }
                 }      
             }
         }
