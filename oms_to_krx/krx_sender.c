@@ -121,8 +121,12 @@ int main() {
                 if (bytes_received < 0) {
                     // Connection closed or error
                     log_message("ERROR", "socket", "Error receiving data\n");
+                    close(sock);
+                    break;
                 } else if (bytes_received == 0) {
-                    log_message("INFO", "socket", "Connection closed by server.\n");
+                    log_message("ERROR", "socket", "Connection closed by server(krx).\n");
+                    close(sock);
+                    break;
                 } else if (bytes_received == sizeof(fot_order_is_submitted)) break;
             }               
     
@@ -135,7 +139,6 @@ int main() {
         }
 
         log_message("INFO", "mq", "Message sent successfully to submit_mq\n");
-        printf("Message sent successfully to submit_mq\n");
 
         // 소켓 종료
         // close(sock);

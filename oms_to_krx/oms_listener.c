@@ -21,6 +21,7 @@
 #include <stdarg.h>
 #include <time.h>
 
+
 typedef struct {
     int wc; // Write counter
 } W_count;
@@ -32,6 +33,8 @@ typedef struct {
 #define BUFFER_SIZE 1024
 
 #define LOG_FILE_PATH "/home/ubuntu/logs/oms_listener.log"
+#define ORDER_TIME_FORMAT "%Y%m%d%H%M%S"
+
 FILE *log_file = NULL;
 
 // Initialize logging
@@ -86,25 +89,99 @@ void save_order_to_file_bin(fkq_order *order, FILE *file) {
         fflush(file);
 }
 
+void send_error_to_oms(fkq_order *order, char *reject_code, int sock){
+    
+    fot_order_is_submitted tx_result;
+    memset(&tx_result, 0, sizeof(fot_order_is_submitted)); // Initialize the struct
+    tx_result.hdr.tr_id = 10;
+    tx_result.hdr.length = sizeof(fot_order_is_submitted);
+
+    strncpy(tx_result.transaction_code, order->transaction_code, sizeof(tx_result.transaction_code));
+    tx_result.transaction_code[sizeof(tx_result.transaction_code) - 1] = '\0'; // Null-terminate
+
+    strncpy(tx_result.user_id, order->user_id, sizeof(tx_result.user_id));
+    tx_result.user_id[sizeof(tx_result.user_id) - 1] = '\0'; // Null-terminate
+    
+    strncpy(tx_result.time, order->order_time, sizeof(tx_result.time));
+    tx_result.time[sizeof(tx_result.time) - 1] = '\0'; // Null-terminate
+
+    strncpy(tx_result.reject_code, reject_code, sizeof(tx_result.reject_code));
+    tx_result.reject_code[sizeof(tx_result.reject_code) - 1] = '\0'; // Null-terminate
+
+    ssize_t bytes_sent = send(sock, &tx_result, sizeof(fot_order_is_submitted), 0);
+    if (bytes_sent < 0) {
+        log_message("ERROR", "socket", "Failed to send data to connected socket");
+    } else if (bytes_sent < sizeof(fot_order_is_submitted)) {
+        log_message("ERROR", "socket", "Partial data sent. Expected %lu bytes, sent %ld bytes.\n",
+                sizeof(fot_order_is_submitted), bytes_sent);
+    } else {
+        log_message("INFO", "socket", "Successfully sent response to OMS via connected socket. Sent %ld bytes.\n", bytes_sent);
+    }
+
+    log_message("INFO", "validation", "sent oms back reject code: %s.\n", reject_code);
+    // fflush(log_file);
+}
+
+int is_order_time_future(const char *order_time) {
+    struct tm order_tm = {0};
+    time_t order_epoch, current_time;
+
+    // Convert order_time string to struct tm
+    if (strptime(order_time, ORDER_TIME_FORMAT, &order_tm) == NULL) {
+        fprintf(stderr, "Error parsing order_time: %s\n", order_time);
+        return -1; // Error case
+    }
+
+    // Convert struct tm to epoch time
+    order_epoch = mktime(&order_tm);
+    if (order_epoch == -1) {
+        fprintf(stderr, "Error converting order_time to epoch\n");
+        return -1;
+    }
+
+    // Get the current epoch time
+    current_time = time(NULL);
+    if (current_time == -1) {
+        fprintf(stderr, "Error getting current time\n");
+        return -1;
+    }
+
+    // Check if current time is more than 2 second past order time
+    if (order_epoch > current_time + 2) {
+        return 1; // order time is future => error
+    } else {
+        return 0; // within range
+    }
+}
+
 int main() {
-    
+
     init_log();
-    
+
     // mysql connection
     MYSQL *conn;
     MYSQL_RES *res;
     MYSQL_ROW row;
     
+    //set timezone as KST
+    setenv("TZ", "Asia/Seoul", 1);
+    tzset(); // Apply the changes
+
     // MySQL 초기화
     conn = mysql_init(NULL);
     if (conn == NULL) {
         log_message("ERROR", "db", "mysql_init() failed\n");
+        log_message("ERROR", "db", "process will be closed...\n");
+        // fflush(log_file);
         return EXIT_FAILURE;
     }
+
     // 데이터베이스 연결
     if (mysql_real_connect(conn, MYSQL_IP, MYSQL_USER, MYSQL_PW, MYSQL_DBNAME, 0, NULL, 0) == NULL) {
         log_message("ERROR", "db", "mysql_real_connect() failed: %s\n", mysql_error(conn));
         mysql_close(conn);
+        log_message("ERROR", "db", "process will be closed...\n");
+        fflush(log_file);
         return EXIT_FAILURE;
     }
 
@@ -131,10 +208,12 @@ int main() {
             shm_fd = shm_open(shared_mem_name, O_RDWR, 0666);
             if (shm_fd == -1) {
                 log_message("ERROR", "shm", "shm_open failed");
+                log_message("ERROR", "shm", "process will be closed...\n");
                 exit(EXIT_FAILURE);
             }
         } else {
             log_message("ERROR", "shm", "shm_open failed");
+            log_message("ERROR", "shm", "process will be closed...\n");
             exit(EXIT_FAILURE);
         }
     } else {
@@ -147,9 +226,9 @@ int main() {
         log_message("ERROR", "shm","ftruncate failed");
         close(shm_fd);
         shm_unlink(shared_mem_name);
+        log_message("ERROR", "shm", "process will be closed...\n");
         exit(EXIT_FAILURE);
     }
-
 
     // Map the shared memory object
     W_count *w_count = mmap(NULL, shared_mem_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
@@ -157,6 +236,7 @@ int main() {
         log_message("ERROR", "shm","mmap failed");
         close(shm_fd);
         shm_unlink(shared_mem_name);
+        log_message("ERROR", "shm", "process will be closed...\n");
         exit(EXIT_FAILURE);
     }
 
@@ -180,6 +260,14 @@ int main() {
     // Create server socket
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
         log_message("ERROR", "socket", "Socket failed");
+        log_message("ERROR", "socket", "process will be closed...\n");
+        exit(EXIT_FAILURE);
+    }
+
+    // 포트 재사용 옵션 추가
+    int opt = 1;
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        log_message("ERROR", "socket", "setsockopt failed");
         exit(EXIT_FAILURE);
     }
 
@@ -192,6 +280,7 @@ int main() {
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
         log_message("ERROR", "socket","Bind failed");
         close(server_fd);
+        log_message("ERROR", "socket", "process will be closed...\n");
         exit(EXIT_FAILURE);
     }
 
@@ -199,6 +288,7 @@ int main() {
     if (listen(server_fd, MAX_CLIENTS) < 0) {
         log_message("ERROR", "socket", "Listen failed");
         close(server_fd);
+        log_message("ERROR", "socket", "process will be closed...\n");
         exit(EXIT_FAILURE);
     }
     int client_sockets[MAX_CLIENTS] = {0}; // Track client sockets
@@ -243,6 +333,7 @@ int main() {
     if (submit_mq == -1) {
         log_message("ERROR", "mq","mq_open (submit mq) failed");
         mq_close(mq);
+        log_message("ERROR", "mq", "process will be closed...\n");
         exit(EXIT_FAILURE);
     }
 
@@ -250,10 +341,10 @@ int main() {
     if (mq_getattr(submit_mq, &submit_attr) == -1) {
         log_message("ERROR", "mq", "mq_getattr");
         mq_close(mq);
+        log_message("ERROR", "mq", "process will be closed...\n");
         exit(EXIT_FAILURE);
     }
     log_message("DEBUG", "mq","submit message queue opened.\n");
-
     
     while (1) {
         // Wait for an event
@@ -277,7 +368,6 @@ int main() {
 
             log_message("INFO", "socket", "New connection from %s:%d\n",
                    inet_ntoa(address.sin_addr), ntohs(address.sin_port));
-
             // Add new socket to poll array
             for (int i = 1; i < MAX_CLIENTS; i++) {
                 if (fds[i].fd == -1) {
@@ -301,11 +391,27 @@ int main() {
                     fds[i].fd = -1;
                 // } else if (bytes_received == sizeof(received_order.hdr.length)) {
                 } else if (bytes_received == sizeof(received_order)) {
-     
+                    
+                    // validation
                     if (received_order.hdr.tr_id !=9 ) { // Example valid range
-                    log_message("INFO", "socket", "skip to process Invalid tr_id: %d\n", received_order.hdr.tr_id);
-                    continue; // Skip processing
-                    }
+                        send_error_to_oms(&received_order, "E002", fds[i].fd);
+                        continue; // Skip processing
+                    } else if (received_order.price < 0){
+                        send_error_to_oms(&received_order, "E102", fds[i].fd);
+                        continue; // Skip processing
+                    } else if (received_order.quantity <= 0){ 
+                        send_error_to_oms(&received_order, "E103", fds[i].fd);
+                        continue; // Skip processing
+                    } else if (!((received_order.order_type != 'B') || (received_order.order_type != 'C') || (received_order.order_type != 'S'))){
+                        send_error_to_oms(&received_order, "E104", fds[i].fd);
+                        continue; // Skip processing
+                    } else if (is_order_time_future(received_order.order_time)){
+                        send_error_to_oms(&received_order, "E105", fds[i].fd);
+                        continue; // Skip processing
+                    } else if ((received_order.order_type == 'C' && strcmp(received_order.original_order, "NA") !=0)) {
+                        send_error_to_oms(&received_order, "E106", fds[i].fd);
+                        continue; // Skip processing
+                    } 
                     log_message("INFO", "order", "Order received successfully.\n");
                     log_message("DEBUG", "order","%d,%d,%s,%s,%s,%s,%c,%d,%s,%d,%s\n",
                             received_order.hdr.tr_id,
@@ -320,11 +426,6 @@ int main() {
                             received_order.price,
                             received_order.original_order);
                     
-                    // Save the order to file
-                    save_order_to_file_bin(&received_order, file);
-                    w_count->wc++;
-                    log_message("INFO", "shm", "wc increased. wc = %d\n", w_count->wc);
-                    printf("wc increased. wc = %d\n", w_count->wc);
                     // db insert
                     // const char *insert_query = "INSERT INTO tx_history (stock_code, stock_name, transaction_code, user_id, order_type, quantity, order_time, price, original_order, status) VALUES (received_order.stock_code, received_order.stock_name, received_order.transaction_code, received_order.user_id, received_order.order_type, received_order.quantity, received_order.order_time, received_order.price, received_order.original_order, 'W')";
                     char insert_query[512];  // Large enough to hold the full query
@@ -336,22 +437,28 @@ int main() {
                             received_order.order_time, received_order.price, received_order.original_order ? received_order.original_order : "NULL");
 
                         if (mysql_query(conn, insert_query)) {
+                            // insert 실패시 에러 반환 로직
+                            send_error_to_oms(&received_order, "E101", fds[i].fd);
                             log_message("ERROR", "db", "INSERT query failed: %s\n", mysql_error(conn));
-                            mysql_close(conn);
-                            // mysql con 끊고 프로세스 죽여버리기 보다 에러코드 oms에 반환하고 그다음 처리하는게..
-                            return EXIT_FAILURE;
+
+                            continue;
                         }
                     log_message("INFO", "DB", "Data is inserted into DB successfully!\n");
+                    // Save the order to file
+                    save_order_to_file_bin(&received_order, file);
+                    w_count->wc++;
+                    log_message("INFO", "shm", "wc increased. wc = %d\n", w_count->wc);
 
                     //send wc
                     if(mq_send(mq, (char *)&w_count->wc, sizeof(int), 0)==-1){
                         log_message("ERROR", "mq", "mq_send failed: could be mq full");
+                        log_message("ERROR", "mq", "process will be closed...\n");
                         exit(1);
                     }           
-                    log_message("DEBUG", "mq", "Msg sent: %d", w_count->wc);   
-
+                    log_message("DEBUG", "mq", "wc msg sent: %d", w_count->wc);   
                     // receive submit_result from queue
                     fot_order_is_submitted submit_result;
+                    memset(&submit_result, 0, sizeof(fot_order_is_submitted));
 
                     ssize_t bytes_read = mq_receive(submit_mq, (char *)&submit_result, submit_attr.mq_msgsize, NULL);
                     // ssize_t bytes_read = mq_receive(submit_mq, buffer, sizeof(fot_order_is_submitted), NULL);
@@ -359,11 +466,11 @@ int main() {
                     if (bytes_read == -1) {
                         log_message("ERROR", "mq","submit_mq_receive failed");
                         mq_close(submit_mq);
+                        log_message("ERROR", "mq", "process will be closed...\n");
                         exit(1);
                     }
 
                     print_fot_order_is_submitted(&submit_result);
-
 
                     // send back to oms by connected socket
                         // for jmeter load test
@@ -377,12 +484,13 @@ int main() {
                         log_message("ERROR", "socket", "Failed to send data to connected socket");
                     } else if (bytes_sent < sizeof(fot_order_is_submitted)) {
                         log_message("ERROR", "socket", "Partial data sent. Expected %lu bytes, sent %ld bytes.\n",
-                                sizeof(fot_order_is_submitted), bytes_sent);
+                        sizeof(fot_order_is_submitted), bytes_sent);
                     } else {
                         log_message("INFO", "socket", "Successfully sent response to OMS via connected socket. Sent %ld bytes.\n", bytes_sent);
                     }
 
                 } else {
+                    send_error_to_oms(&received_order, "E001", fds[i].fd);
                     log_message("ERROR", "socket", "Incomplete data received. Expected %lu bytes, got %ld bytes.\n", sizeof(fkq_order), bytes_received);
                 }    
             }

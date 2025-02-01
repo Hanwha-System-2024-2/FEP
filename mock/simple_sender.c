@@ -12,24 +12,37 @@ typedef struct {
 } hdr;
 
 typedef struct {
-    hdr hdr;
-    char stock_code[7];       // 종목코드
-    char stock_name[51];      // 종목명 
-    char transaction_code[7]; // 거래코드 
-    char user_id[21];         // 유저 ID 
-    char order_type;          // 매수(B) / 매도(S) (1바이트)
-    int quantity;             // 수량 (정수형)
-    char order_time[15];      // 주문시간 (YYYYMMDDHHMMSS)
-    int price;                // 호가 (정수형)
-    char original_order[7];   // 원주문번호 (문자열)
-} fkq_order;
+    hdr hdr;           // 4 bytes
+    char stock_code[7];     // 7 bytes
+    char padding1;          // 1 byte (패딩)
+    char stock_name[51];    // 51 bytes
+    char padding2;          // 1 byte (패딩)
+    char transaction_code[7]; // 7 bytes
+    char padding3;          // 1 byte (패딩)
+    char user_id[21];       // 21 bytes
+    char padding4[3];       // 3 bytes (패딩, 4의 배수 정렬)
+    char order_type;        // 1 byte
+    char padding5[3];       // 3 bytes (패딩)
+    int quantity;           // 4 bytes
+    char order_time[15];    // 15 bytes
+    char padding6;          // 1 byte (패딩)
+    int price;              // 4 bytes
+    char original_order[7]; // 7 bytes
+    char padding7;          // 1 byte (패딩)
+} fkq_order;  // **총 136 bytes (패딩 포함)**
+
+
 
 typedef struct {
     hdr hdr;
-    char transaction_code[7]; // 거래코드 
-    char user_id[21];         // 유저 ID 
+    char transaction_code[7]; // 거래코드
+    char padding1;          // 1 byte (패딩)
+    char user_id[21];         // 유저 ID
+    char padding2[3];          // 1 byte (패딩) 
     char time[15];            // 응답시간 (YYYYMMDDHHMMSS)
+    char padding3;          // 1 byte (패딩)
     char reject_code[7];      // 거부사유코드 (문자열)
+    char padding4;          // 1 byte (패딩)
 } fot_order_is_submitted;
 
 // Function to print the received structure

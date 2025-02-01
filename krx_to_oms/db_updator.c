@@ -57,7 +57,6 @@ void log_message(const char *level, const char *module, const char *format, ...)
     va_start(args, format);
     vfprintf(log_file, format, args);
     va_end(args);
-
     fflush(log_file);
 }
 
@@ -97,6 +96,10 @@ int main() {
         log_message("ERROR", "db", "mysql_init() failed\n");
         return EXIT_FAILURE;
     }
+    // MySQL connection options
+    // mysql_options(conn, MYSQL_OPT_SSL_MODE, "DISABLED"); // Disable SSL if not needed
+    // mysql_options(conn, MYSQL_OPT_CONNECT_TIMEOUT, (const void *)5); // Set timeout
+
     // 데이터베이스 연결
     if (mysql_real_connect(conn, MYSQL_IP, MYSQL_USER, MYSQL_PW, MYSQL_DBNAME, 0, NULL, 0) == NULL) {
         log_message("ERROR", "db", "mysql_real_connect() failed: %s\n", mysql_error(conn));
@@ -122,21 +125,43 @@ int main() {
             }
             fread(&execution, sizeof(kft_execution), 1, file);
             print_kft_execution(&execution);
-
-            if (strcmp(execution.reject_code, "0000") == 0) {
+            
+            char query[512] = {0};
+            char status;
+            char truncated_reject_code[5];  // 4 bytes + 1 for null terminator
+            strncpy(truncated_reject_code, execution.reject_code, 4);
+            truncated_reject_code[4] = '\0';  // Ensure null termination
+            
+            if (execution.status_code == 0) {
                 // db update
-                // Create query string with transaction_code safely
-                char query[512] = {0};
-                snprintf(query, sizeof(query), "UPDATE tx_history SET status = 'D' WHERE transaction_code = '%s'", execution.transaction_code);
-                
-                // Execute the update query
-                if (mysql_query(conn, query)) {
-                    fprintf(stderr, "UPDATE query failed: %s\n", mysql_error(conn));
-                    mysql_close(conn);
-                    return EXIT_FAILURE;
-                }
-                log_message("INFO", "db","update query executed successfully!\n");
+                // Create query string with transaction_code safely    
+                // snprintf(query, sizeof(query), "UPDATE tx_history SET status = 'D' WHERE transaction_code = '%s'", execution.transaction_code);
+                snprintf(query, sizeof(query),
+                "UPDATE tx_history SET status = 'D', reject_code = '%s' WHERE transaction_code = '%s'",
+                truncated_reject_code, execution.transaction_code);
+                status = 'D';
+            } else if (execution.status_code == 1){
+                // snprintf(query, sizeof(query), "UPDATE tx_history SET status = 'C' WHERE transaction_code = '%s'", execution.transaction_code);
+                snprintf(query, sizeof(query),
+                "UPDATE tx_history SET status = 'C', reject_code = '%s' WHERE transaction_code = '%s'",
+                truncated_reject_code, execution.transaction_code);
+                status = 'C';
+            } else if (execution.status_code == 99){
+                // snprintf(query, sizeof(query), "UPDATE tx_history SET status = 'R' WHERE transaction_code = '%s'", execution.transaction_code);
+                snprintf(query, sizeof(query),
+                "UPDATE tx_history SET status = 'R', reject_code = '%s' WHERE transaction_code = '%s'",
+                truncated_reject_code, execution.transaction_code);
+                status = 'R';
             }
+
+            // Execute the update query
+            if (mysql_query(conn, query)) {
+                fprintf(stderr, "UPDATE query failed: %s\n", mysql_error(conn));
+                mysql_close(conn);
+                // return EXIT_FAILURE;
+            }
+            log_message("INFO", "db","update status to %c executed successfully!\n", status);
+
             r_count->rc++;
             log_message("INFO", "shm", "current exec rc = %d\n", r_count->rc);
         }   
@@ -234,7 +259,6 @@ int main() {
         if(received_wc > r_count->rc){
             read_exec_from_bin_file(file, r_count->rc, received_wc, r_count);
         }
-
     }
     
     // // Close and unlink the message queue
