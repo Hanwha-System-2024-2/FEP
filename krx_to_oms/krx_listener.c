@@ -300,14 +300,14 @@ int main() {
                 ssize_t bytes_received = recv(fds[i].fd, &execution, sizeof(execution), 0);
                 if (bytes_received <= 0) {
                     // Connection closed or error
-                    printf("Client disconnected\n");
+                    log_message("ERROR", "socket","Client disconnected\n");
                     close(fds[i].fd);
                     fds[i].fd = -1;
                 // } else if (bytes_received == sizeof(received_order.hdr.length)) {
                 } else if (bytes_received == sizeof(kft_execution)) {
                     // validation
                     if (execution.hdr.tr_id !=11 ) { 
-                        printf("skip to process Invalid tr_id: %d\n", execution.hdr.tr_id);
+                        log_message("INFO", "validation", "skip to process Invalid tr_id: %d\n", execution.hdr.tr_id);
                         continue; 
                     } else if (!((execution.status_code == 0) || (execution.status_code == 1) || (execution.status_code == 99))) { 
                         log_message("INFO", "validation", "invalid krx execution status code : %s.\n", "E301");
@@ -323,14 +323,13 @@ int main() {
                         continue; // Skip processing
                     }
      
-                    printf("execution result arrived\n");
+                    log_message("INFO", "execution", "execution result arrived\n");
                     print_kft_execution(&execution);
 
                     save_order_to_file_bin(&execution, file);
                     log_message("INFO", "FILE", "execution is written to a file");
                     w_count->wc++;
                     log_message("INFO", "shm", "krx_wc increased. wc = %d\n", w_count->wc);
-                    printf("krx_wc increased. wc = %d\n", w_count->wc);
 
                     //send wc
                     if(mq_send(mq, (char *)&w_count->wc, sizeof(int), 0)==-1){

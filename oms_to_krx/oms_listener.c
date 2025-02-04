@@ -111,6 +111,8 @@ void send_error_to_oms(fkq_order *order, char *reject_code, int sock){
     ssize_t bytes_sent = send(sock, &tx_result, sizeof(fot_order_is_submitted), 0);
     if (bytes_sent < 0) {
         log_message("ERROR", "socket", "Failed to send data to connected socket");
+    } else if (bytes_sent == 0) {
+        log_message("ERROR", "socket", "Peer has closed the connection. Sending might not work.");
     } else if (bytes_sent < sizeof(fot_order_is_submitted)) {
         log_message("ERROR", "socket", "Partial data sent. Expected %lu bytes, sent %ld bytes.\n",
                 sizeof(fot_order_is_submitted), bytes_sent);
@@ -383,6 +385,8 @@ int main() {
         for (int i = 1; i < MAX_CLIENTS; i++) {
             if (fds[i].fd != -1 && (fds[i].revents & POLLIN)) {
                 fkq_order received_order;
+                memset(&received_order, 0, sizeof(fkq_order)); // Initialize the struct
+                
                 ssize_t bytes_received = recv(fds[i].fd, &received_order, sizeof(received_order), 0);
                 if (bytes_received <= 0) {
                     // Connection closed or error
@@ -461,7 +465,25 @@ int main() {
                     memset(&submit_result, 0, sizeof(fot_order_is_submitted));
 
                     ssize_t bytes_read = mq_receive(submit_mq, (char *)&submit_result, submit_attr.mq_msgsize, NULL);
-                    // ssize_t bytes_read = mq_receive(submit_mq, buffer, sizeof(fot_order_is_submitted), NULL);
+
+                    // strncpy for comm w javascript
+                    fot_order_is_submitted result_for_sending;
+                    memset(&result_for_sending, 0, sizeof(fot_order_is_submitted)); // Initialize the struct
+                    result_for_sending.hdr.tr_id = submit_result.hdr.tr_id;
+                    result_for_sending.hdr.length = submit_result.hdr.length;
+
+                    strncpy(result_for_sending.transaction_code, submit_result.transaction_code, sizeof(result_for_sending.transaction_code));
+                    result_for_sending.transaction_code[sizeof(result_for_sending.transaction_code) - 1] = '\0'; // Null-terminate
+
+                    strncpy(result_for_sending.user_id, submit_result.user_id, sizeof(result_for_sending.user_id));
+                    result_for_sending.user_id[sizeof(result_for_sending.user_id) - 1] = '\0'; // Null-terminate
+
+                    strncpy(result_for_sending.time, submit_result.time, sizeof(result_for_sending.time));
+                    result_for_sending.time[sizeof(result_for_sending.time) - 1] = '\0'; // Null-terminate
+
+                    strncpy(result_for_sending.reject_code, submit_result.reject_code, sizeof(result_for_sending.reject_code));
+                    result_for_sending.reject_code[sizeof(result_for_sending.reject_code) - 1] = '\0'; // Null-terminate
+                    ////
 
                     if (bytes_read == -1) {
                         log_message("ERROR", "mq","submit_mq_receive failed");
@@ -470,16 +492,11 @@ int main() {
                         exit(1);
                     }
 
-                    print_fot_order_is_submitted(&submit_result);
+                    print_fot_order_is_submitted(&result_for_sending);
 
                     // send back to oms by connected socket
-                        // for jmeter load test
-                    // int response_size = sizeof(submit_result);
-                    // send(fds[i].fd, &response_size, sizeof(response_size), 0); // Send size first
-                    // char ack_message[] = "ACK\n";
-                    // send(fds[i].fd, ack_message, sizeof(ack_message), 0);
+                    ssize_t bytes_sent = send(fds[i].fd, &result_for_sending, sizeof(fot_order_is_submitted), 0);
 
-                    ssize_t bytes_sent = send(fds[i].fd, &submit_result, sizeof(fot_order_is_submitted), 0);
                     if (bytes_sent < 0) {
                         log_message("ERROR", "socket", "Failed to send data to connected socket");
                     } else if (bytes_sent < sizeof(fot_order_is_submitted)) {
