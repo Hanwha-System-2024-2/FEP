@@ -11,6 +11,7 @@
 #include <oms_fep_krx_struct.h>
 #include <envs.h>
 #include <mysql/mysql.h>
+#include <pthread.h>  // For threads
 
 // shared memory
 #include <sys/mman.h>
@@ -28,6 +29,8 @@ typedef struct {
 
 #define QUEUE_NAME "/wc_queue"
 #define SUBMIT_QUEUE_NAME "/submit_queue"
+#define KRX_CLOSED_QUE "/krx_closed_que"  // Message queue name
+
 // socket
 #define MAX_CLIENTS 20
 #define BUFFER_SIZE 1024
@@ -35,7 +38,61 @@ typedef struct {
 #define LOG_FILE_PATH "/home/ubuntu/logs/oms_listener.log"
 #define ORDER_TIME_FORMAT "%Y%m%d%H%M%S"
 
+
 FILE *log_file = NULL;
+
+// Global variables for sockets
+int client_sockets[MAX_CLIENTS] = {0}; // Track client sockets
+
+// Function to close all active sockets
+void disconnect_clients() {
+    log_message("INFO", "socket", "Disconnecting all clients connected to FEP_OMS_R_PORT...\n");
+
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (client_sockets[i] > 0) {
+            close(client_sockets[i]);  // Close the socket
+            client_sockets[i] = -1;  // Mark as closed
+        }
+    }
+
+    log_message("INFO", "socket", "All client connections closed.\n");
+}
+
+// Thread function to monitor the KRX_CLOSED_QUE
+void *monitor_krx_closed_queue(void *arg) {
+    mqd_t krx_mq;
+    struct mq_attr krx_attr;
+    krx_attr.mq_flags = 0;
+    krx_attr.mq_maxmsg = 10;  // Maximum number of messages in the queue
+    krx_attr.mq_msgsize = sizeof(int);  // Message size
+    krx_attr.mq_curmsgs = 0;
+
+    // Open the message queue
+    krx_mq = mq_open(KRX_CLOSED_QUE, O_CREAT | O_RDONLY, 0644, &krx_attr);
+    if (krx_mq == -1) {
+        log_message("ERROR", "mq", "Failed to open krx_closed_que\n");
+        return NULL;
+    }
+
+    log_message("INFO", "mq", "Monitoring krx_closed_que for disconnection events...\n");
+
+    int received_value;
+    while (1) {
+        ssize_t bytes_read = mq_receive(krx_mq, (char *)&received_value, sizeof(int), NULL);
+        if (bytes_read == -1) {
+            log_message("ERROR", "mq", "mq_receive failed in krx_closed_que\n");
+            continue;
+        }
+
+        log_message("INFO", "mq", "Received disconnect signal from KRX_CLOSED_QUE\n");
+
+        // Close all client connections
+        disconnect_clients();
+    }
+
+    mq_close(krx_mq);
+    return NULL;
+}
 
 // Initialize logging
 void init_log() {
@@ -160,6 +217,15 @@ int is_order_time_future(const char *order_time) {
 int main() {
 
     init_log();
+
+    // Create thread to monitor KRX_CLOSED_QUE
+    pthread_t krx_thread;
+    if (pthread_create(&krx_thread, NULL, monitor_krx_closed_queue, NULL) != 0) {
+        log_message("ERROR", "thread", "Failed to create krx_closed_que monitoring thread\n");
+        return EXIT_FAILURE;
+    }
+
+    log_message("INFO", "thread", "KRX_CLOSED_QUE monitoring thread started successfully\n");
 
     // mysql connection
     MYSQL *conn;
@@ -294,7 +360,7 @@ int main() {
         log_message("ERROR", "socket", "process will be closed...\n");
         exit(EXIT_FAILURE);
     }
-    int client_sockets[MAX_CLIENTS] = {0}; // Track client sockets
+    // int client_sockets[MAX_CLIENTS] = {0}; // Track client sockets
     log_message("DEBUG", "socket", "Server listening on port %d\n", FEP_OMS_R_PORT);
 
     // Poll array to monitor multiple file descriptors
@@ -517,9 +583,11 @@ int main() {
     }
 
     close(server_fd);
+    pthread_join(krx_thread, NULL);
+
     // Close the message queue
     mq_close(mq);
-
+    mq_close(KRX_CLOSED_QUE);
    // 연결 닫기
     mysql_close(conn);
 
